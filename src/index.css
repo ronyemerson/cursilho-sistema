@@ -1,0 +1,23 @@
+/* src/index.css — versão correta */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Mantém altura total */
+html, body, #root {
+  height: 100%;
+}
+
+/* Remove o bg-slate-50 que destruiu o layout */
+body {
+  @apply bg-transparent;
+  font-family: Inter, system-ui, sans-serif;
+}
+
+/* Classe opcional para backgrounds com imagem */
+.bg-cursilho {
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+}
