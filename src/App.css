@@ -40,3 +40,40 @@
 .read-the-docs {
   color: #888;
 }
+
+/* glass + blur helpers (caso seu Tailwind não tenha) */
+.backdrop-blur-md {
+  backdrop-filter: blur(8px);
+}
+
+/* animação fadeIn */
+@keyframes fadeInUp {
+  from { transform: translateY(8px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.animate-fadeIn { animation: fadeInUp 380ms ease-out both; }
+
+/* pequenas melhorias de foco */
+:focus {
+  outline: none;
+  box-shadow: 0 0 0 4px rgba(99,102,241,0.12);
+}
+
+/* suaviza inputs e botões */
+input, textarea, select, button {
+  transition: box-shadow .18s ease, transform .12s ease, background-color .12s;
+}
+
+/* progress bar base */
+.progress-track {
+  background: linear-gradient(90deg, rgba(15,23,42,0.08), rgba(15,23,42,0.02));
+  border-radius: 999px;
+  height: 10px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4f46e5, #06b6d4);
+  width: 0%;
+  transition: width 420ms cubic-bezier(.2,.9,.3,1);
+}

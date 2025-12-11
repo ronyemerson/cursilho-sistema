@@ -1,22 +1,16 @@
 // src/components/forms/CursilhistaStepperFormFull.tsx
 import React, { useEffect, useRef, useState } from "react";
-
-/**
- * CursilhistaStepperFormFull.tsx
- * - Versão completa do formulário de inscrição do cursilhista
- * - Máscaras, validações, verificação de CPF, enter-handling, modal e envio
- *
- * Dependências: TailwindCSS (classes usadas no markup).
- *
- * Environment:
- * - VITE_API_FUNCTIONS_URL deve apontar para as edge functions:
- *   - GET  /check-cpf?cpf=XXXXXXXXXXX  -> { exists: boolean, person?: {} }
- *   - POST /submit-inscricao          -> aceita payload JSON descrito abaixo
- */
+import ProgressBar from "../ProgressBar";
+import { maskCpf, maskWhatsapp, maskTelefone, maskDate, onlyDigits } from "../../utils/masks";
+import { UFs, lookupCepViaCep } from "../../utils/locations";
+import {
+  getTermosParagrafos,
+  getPdfPath,
+  requireAgreement,
+  attachTermosToPayload,
+} from "../../utils/instructions";
 
 const API_BASE = import.meta.env.VITE_API_FUNCTIONS_URL ?? "";
-
-// Toggle debug logs
 const DEBUG = false;
 
 type PersonalState = {
@@ -24,11 +18,16 @@ type PersonalState = {
   whatsapp: string;
   nascimento?: string;
   contatoAltern?: string;
+  cep?: string;
+  logradouro?: string;   // rua
+  numero?: string;       // número inserido pelo usuário
+  complemento?: string;  // complemento inserido pelo usuário
   cidade?: string;
   uf?: string;
   igreja?: string;
   email?: string;
 };
+
 
 type FinanceState = {
   responsavelProrio: boolean;
@@ -44,19 +43,14 @@ type Payload = {
   email?: string;
   termos: {
     aceite: boolean;
+    versao?: string;
+    aceite_ts?: string;
   };
   dadosPessoais: PersonalState;
-  contato: {
-    whatsapp?: string;
-    contatoAltern?: string;
-  };
+  contato: { whatsapp?: string; contatoAltern?: string };
   saude?: string;
   financeiro: FinanceState;
-  responsavelFinanceiro?: {
-    nome?: string;
-    relacao?: string;
-    whatsapp?: string;
-  };
+  responsavelFinanceiro?: { nome?: string; relacao?: string; whatsapp?: string };
   observacoes?: string;
 };
 
@@ -70,14 +64,18 @@ export default function CursilhistaStepperFormFull() {
   const [agreement, setAgreement] = useState<boolean>(false);
 
   const [personal, setPersonal] = useState<PersonalState>({
-    nome: "",
-    whatsapp: "",
-    nascimento: "",
-    contatoAltern: "",
-    cidade: "",
-    uf: "",
-    igreja: "",
-    email: "",
+	  nome: "",
+	  whatsapp: "",
+	  nascimento: "",
+	  contatoAltern: "",
+	  cep: "",
+	  logradouro: "",
+	  numero: "",
+	  complemento: "",
+	  cidade: "",
+	  uf: "",
+	  igreja: "",
+	  email: "",
   });
 
   const [saude, setSaude] = useState<string>("");
@@ -94,53 +92,27 @@ export default function CursilhistaStepperFormFull() {
   const [modalOpen, setModalOpen] = useState<boolean>(false);
   const [submissionResult, setSubmissionResult] = useState<any>(null);
 
+  // CEP-specific state
+  const [cep, setCep] = useState<string>(personal.cep || "");
+  const [cidade, setCidade] = useState<string>(personal.cidade || "");
+  const [ufSelected, setUfSelected] = useState<string>(personal.uf || "");
+  const [cepLoading, setCepLoading] = useState<boolean>(false);
+  const [cepError, setCepError] = useState<string | null>(null);
+
   // -----------------------
-  // MÁSCARAS E UTILS
+  // Pequena função local para formatar CEP (não depende de masks.ts)
   // -----------------------
-  function onlyDigits(v: string) {
-    return v.replace(/\D/g, "");
-  }
-
-  function limitDigits(v: string, max: number) {
-    return onlyDigits(v).slice(0, max);
-  }
-
-  function maskCpf(v: string): string {
-    return limitDigits(v, 11)
-      .replace(/(\d{3})(\d)/, "$1.$2")
-      .replace(/(\d{3})(\d)/, "$1.$2")
-      .replace(/(\d{3})(\d{1,2})$/, "$1-$2");
-  }
-
-  function maskWhatsapp(v: string): string {
-    const d = limitDigits(v, 11);
-    // (11) 98765-4321
-    return d
-      .replace(/^(\d{2})(\d)/, "($1) $2")
-      .replace(/(\d{5})(\d)/, "$1-$2");
-  }
-
-  function maskTelefone(v: string): string {
-    const d = limitDigits(v, 11);
-    if (d.length <= 10) {
-      return d.replace(/^(\d{2})(\d)/, "($1) $2").replace(/(\d{4})(\d)/, "$1-$2");
-    }
-    return d.replace(/^(\d{2})(\d)/, "($1) $2").replace(/(\d{5})(\d)/, "$1-$2");
-  }
-
-  function maskCEP(v: string) {
-    return limitDigits(v, 8).replace(/^(\d{5})(\d{1,3})/, "$1-$2");
-  }
-
-  function maskDate(v: string) {
-    return limitDigits(v, 8).replace(/(\d{2})(\d)/, "$1/$2").replace(/(\d{2})(\d)/, "$1/$2");
+  function formatCep(raw: string) {
+    const d = raw.replace(/\D/g, "").slice(0, 8);
+    if (d.length <= 5) return d;
+    return `${d.slice(0, 5)}-${d.slice(5)}`;
   }
 
   // -----------------------
   // VALIDAÇÕES
   // -----------------------
   function validateCpfRaw(raw: string): boolean {
-    const s = raw.replace(/\D/g, "");
+    const s = onlyDigits(raw);
     if (s.length !== 11) return false;
     if (/^(\d)\1+$/.test(s)) return false;
     const calc = (t: number) => {
@@ -154,7 +126,6 @@ export default function CursilhistaStepperFormFull() {
 
   function validateWhatsappFormatted(formatted: string) {
     const d = onlyDigits(formatted);
-    // mínimo 10 (fixo) ou 11 (celular com 9)
     return d.length === 10 || d.length === 11;
   }
 
@@ -255,6 +226,51 @@ export default function CursilhistaStepperFormFull() {
   }, [debouncedCpf]);
 
   // -----------------------
+  // CEP lookup: dispara quando completa 8 dígitos
+  // -----------------------
+  const debouncedCep = useDebouncedValue(cep, 600);
+
+  useEffect(() => {
+    const digits = (debouncedCep || "").replace(/\D/g, "");
+    if (digits.length !== 8) {
+      setCepError(null);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      setCepLoading(true);
+      setCepError(null);
+      try {
+        const data = await lookupCepViaCep(digits);
+        if (cancelled) return;
+        if (!data) {
+          setCepError("CEP não encontrado");
+          return;
+        }
+        // preencher cidade e uf no formulário (permite edição)
+        setCidade(data.localidade ?? "");
+        setUfSelected(data.uf ?? "");
+       		setPersonal((p) => ({
+			  ...p,
+			  cidade: data.localidade ?? "",
+			  uf: data.uf ?? "",
+			  cep: digits,
+			  logradouro: data.logradouro,
+			}));
+      } catch (err) {
+        if (!cancelled) setCepError("Erro ao buscar CEP");
+      } finally {
+        if (!cancelled) setCepLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [debouncedCep]);
+
+  // -----------------------
   // NAVEGAÇÃO ENTRE STEPS (centraliza validações)
   // -----------------------
   function next(): void {
@@ -292,16 +308,9 @@ export default function CursilhistaStepperFormFull() {
         alert("Preencha dados do responsável financeiro.");
         return;
       }
-      // se responsavelProrio true, preenche dados automaticamente ao enviar.
-    }
-
-    if (step === 4) {
-      // confirma seleção de método - sem validação extra
     }
 
     setStep((s) => s + 1);
-
-    // smooth scroll to top of form
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -315,13 +324,10 @@ export default function CursilhistaStepperFormFull() {
   // -----------------------
   function handleKeyDownForm(e: React.KeyboardEvent<HTMLFormElement>) {
     if (e.key === "Enter") {
-      // let Enter act like "Avançar" (respeitando validações) if not on final review
       if (step !== 5) {
         e.preventDefault();
-        // small debounce guard
         if (!loading) next();
       }
-      // if step === 5 -> let Enter submit normally
     }
   }
 
@@ -329,13 +335,18 @@ export default function CursilhistaStepperFormFull() {
   // ENVIO: mostra modal de confirmação e então POST
   // -----------------------
   function buildPayload(): Payload {
-    const payload: Payload = {
+    const base: Omit<Payload, "termos"> = {
       cpf: onlyDigits(cpf),
       email: personal.email,
-      termos: {
-        aceite: agreement,
-      },
-      dadosPessoais: personal,
+		dadosPessoais: {
+		  ...personal,
+		  logradouro: personal.logradouro || "",
+		  numero: personal.numero || "",
+		  complemento: personal.complemento || "",
+		  cidade: cidade || personal.cidade || "",
+		  uf: ufSelected || personal.uf || "",
+		  cep: (cep || personal.cep || "").replace(/\D/g, ""),
+		},
       contato: {
         whatsapp: personal.whatsapp,
         contatoAltern: personal.contatoAltern,
@@ -356,7 +367,10 @@ export default function CursilhistaStepperFormFull() {
       observacoes: undefined,
     };
 
-    return payload;
+    // Anexa automaticamente os termos (versão + timestamp) para auditoria
+    const payloadWithTermos = attachTermosToPayload(base as object, agreement);
+
+    return payloadWithTermos as Payload;
   }
 
   async function submitPayload() {
@@ -374,7 +388,6 @@ export default function CursilhistaStepperFormFull() {
         throw new Error("API_BASE não configurada (VITE_API_FUNCTIONS_URL).");
       }
 
-      // Exemplo: enviar para edge function que salva no Supabase (server-side)
       const url = `${API_BASE.replace(/\/$/, "")}/submit-inscricao`;
       const res = await fetch(url, {
         method: "POST",
@@ -387,7 +400,6 @@ export default function CursilhistaStepperFormFull() {
         throw new Error(json?.error || `Erro ${res.status} ao submeter inscrição`);
       }
 
-      // sucesso
       setSubmissionResult(json);
       setStep(6);
       setModalOpen(false);
@@ -404,12 +416,12 @@ export default function CursilhistaStepperFormFull() {
   // -----------------------
   return (
     <div className="max-w-3xl mx-auto p-6">
-      <h1 className="text-2xl font-semibold mb-4">Inscrição — 14º Cursilho Masculino</h1>
+      <ProgressBar step={step + 1} total={6} />
 
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          // Se não estiver no resumo, tenta avançar e evita envio
+          // Se não estivermos no resumo, tenta avançar e evita envio
           if (step !== 5) {
             next();
             return;
@@ -420,31 +432,62 @@ export default function CursilhistaStepperFormFull() {
         onKeyDown={handleKeyDownForm}
         className="bg-white shadow rounded-lg p-6"
       >
-        {/* PROGRESS INDICATOR */}
-        <div className="mb-4 text-sm text-slate-500">Etapa {Math.min(step + 1, 6)} de 6</div>
-
-        {/* STEP 0 — TERMOS */}
+        {/* STEP 0 — TERMOS (ATUALIZADO: texto + link PDF + checkbox obrigatório) */}
         {step === 0 && (
           <section>
             <h2 className="text-lg font-medium">Termos, LGPD e Ciência</h2>
-            <div className="mt-3 text-sm text-slate-700 space-y-2">
-              <p>
-                Declaro que li inteira e atentamente as informações do evento (data, local, transporte,
-                permanência). Estou ciente de que a participação exige permanência integral no local e do
-                regulamento de desistência e pagamento.
-              </p>
-              <p className="text-xs text-slate-500">(texto oficial extraído do formulário original)</p>
+
+            <div className="mt-3 text-sm text-slate-700 space-y-3">
+              <div className="p-4 border rounded bg-slate-50 max-h-48 overflow-auto text-sm leading-relaxed">
+                {getTermosParagrafos().map((p, i) => (
+                  <p key={i} className="mb-3">
+                    {p}
+                  </p>
+                ))}
+              </div>
+
+              <div className="text-xs text-slate-500">
+                Estes termos são baseados no formulário oficial do evento. Consulte o documento completo clicando em “Ver Termos (PDF)”.
+              </div>
+
+              <div className="mt-3 flex items-center gap-3">
+                <a href={getPdfPath()} target="_blank" rel="noopener noreferrer" className="text-sm underline text-indigo-600">
+                  Ver Termos (PDF)
+                </a>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    window.open(getPdfPath(), "_blank");
+                  }}
+                  className="px-3 py-1 bg-slate-100 rounded text-sm"
+                >
+                  Abrir PDF
+                </button>
+              </div>
             </div>
 
             <label className="mt-6 flex items-start gap-3">
-              <input type="checkbox" checked={agreement} onChange={(e) => setAgreement(e.target.checked)} />
-              <span>Li e estou de acordo com os termos do evento</span>
+              <input
+                type="checkbox"
+                checked={agreement}
+                onChange={(e) => setAgreement(e.target.checked)}
+                aria-required
+              />
+              <span>Li e estou de acordo com os termos do evento (permanência, transporte, pagamento e política de desistência).</span>
             </label>
 
             <div className="mt-6 flex justify-end">
               <button
                 type="button"
-                onClick={() => setStep(1)}
+                onClick={() => {
+                  try {
+                    requireAgreement(agreement);
+                    setStep(1);
+                  } catch (err: any) {
+                    alert(err?.message || "Você precisa aceitar os termos para prosseguir.");
+                  }
+                }}
                 disabled={!agreement}
                 className={`px-4 py-2 rounded ${agreement ? "bg-indigo-600 text-white" : "bg-slate-200 text-slate-400"}`}
               >
@@ -520,27 +563,101 @@ export default function CursilhistaStepperFormFull() {
                 className="border rounded p-2"
               />
 
-              <div className="grid grid-cols-3 gap-2">
-                <input
-                  value={personal.cidade}
-                  onChange={(e) => setPersonal({ ...personal, cidade: e.target.value })}
-                  placeholder="Cidade"
-                  className="border rounded p-2"
-                />
-                <input
-                  value={personal.uf}
-                  onChange={(e) => setPersonal({ ...personal, uf: e.target.value })}
-                  placeholder="UF"
-                  className="border rounded p-2"
-                  maxLength={2}
-                />
-                <input
-                  value={personal.igreja}
-                  onChange={(e) => setPersonal({ ...personal, igreja: e.target.value })}
-                  placeholder="Igreja"
-                  className="border rounded p-2"
-                />
-              </div>
+{/* Novo bloco: CEP + Logradouro (prefill) + Número + Complemento + Cidade + UF (select) + Igreja */}
+<div className="grid grid-cols-1 gap-3 mt-4">
+  {/* CEP */}
+  <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-center">
+    <div className="md:col-span-1">
+      <input
+        value={cep}
+        onChange={(e) => {
+          const formatted = formatCep(e.target.value);
+          setCep(formatted);
+          setPersonal((p) => ({ ...p, cep: formatted.replace(/\D/g, "") }));
+        }}
+        placeholder="CEP (ex: 01234-567)"
+        className="border rounded p-2 w-full"
+        inputMode="numeric"
+      />
+      {cepLoading && <span className="text-xs text-slate-500">Buscando CEP...</span>}
+      {cepError && <div role="alert" className="text-xs text-red-600">{cepError}</div>}
+    </div>
+
+    {/* Logradouro (preenchido pela ViaCEP, ainda editável) */}
+    <div className="md:col-span-2">
+      <input
+        value={personal.logradouro || ""}
+        onChange={(e) => setPersonal((p) => ({ ...p, logradouro: e.target.value }))}
+        placeholder="Logradouro (Rua / Av)"
+        className="border rounded p-2 w-full"
+      />
+    </div>
+
+    {/* Número */}
+    <div className="md:col-span-1">
+      <input
+        value={personal.numero || ""}
+        onChange={(e) => setPersonal((p) => ({ ...p, numero: e.target.value }))}
+        placeholder="Nº"
+        className="border rounded p-2 w-full"
+        inputMode="numeric"
+      />
+    </div>
+
+    {/* Complemento (linha completa em desktop) */}
+    <div className="md:col-span-4">
+      <input
+        value={personal.complemento || ""}
+        onChange={(e) => setPersonal((p) => ({ ...p, complemento: e.target.value }))}
+        placeholder="Complemento (opcional)"
+        className="border rounded p-2 w-full"
+      />
+    </div>
+
+    {/* Cidade */}
+    <div className="md:col-span-2">
+      <input
+        value={cidade}
+        onChange={(e) => {
+          setCidade(e.target.value);
+          setPersonal((p) => ({ ...p, cidade: e.target.value }));
+        }}
+        placeholder="Cidade"
+        className="border rounded p-2 w-full"
+      />
+    </div>
+
+    {/* UF select */}
+    <div className="md:col-span-1">
+      <select
+        value={ufSelected}
+        onChange={(e) => {
+          setUfSelected(e.target.value);
+          setPersonal((p) => ({ ...p, uf: e.target.value }));
+        }}
+        className="border rounded p-2 w-full"
+      >
+        <option value="">UF</option>
+        {UFs.map((s) => (
+          <option key={s.code} value={s.code}>
+            {s.code} — {s.name}
+          </option>
+        ))}
+      </select>
+    </div>
+
+    {/* Igreja ocupa a linha completa */}
+    <div className="md:col-span-4">
+      <input
+        value={personal.igreja || ""}
+        onChange={(e) => setPersonal({ ...personal, igreja: e.target.value })}
+        placeholder="Igreja"
+        className="border rounded p-2 w-full"
+      />
+    </div>
+  </div>
+</div>
+
 
               <input
                 value={personal.email}
@@ -694,6 +811,19 @@ export default function CursilhistaStepperFormFull() {
               </p>
               <p>
                 <strong>Data Nasc.:</strong> {personal.nascimento || "-"}
+              </p>
+			  <p>
+				  <strong>Endereço:</strong>{" "}
+				  {personal.logradouro ? `${personal.logradouro}` : "-"}
+				  {personal.numero ? `, ${personal.numero}` : ""}{" "}
+				  {personal.complemento ? `(${personal.complemento})` : ""}{" "}
+				  - {cidade || personal.cidade || "-"} / {ufSelected || personal.uf || "-"}
+			  </p>
+              <p>
+                <strong>CEP:</strong> {(cep || personal.cep) || "-"}
+              </p>
+              <p>
+                <strong>Cidade / UF:</strong> {cidade || personal.cidade || "-"} / {ufSelected || personal.uf || "-"}
               </p>
               <p>
                 <strong>Valor:</strong> R$ {finance.amount.toFixed(2)}
